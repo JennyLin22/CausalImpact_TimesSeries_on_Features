@@ -1,0 +1,13 @@
+metric,value
+Total Properties,146
+Mean DOM Change (days),0.4
+Median DOM Change (days),-0.0
+Mean DOM Change (%),1.0%
+Properties Improved,73 (50.0%)
+Properties Worsened,71 (48.6%)
+T-statistic,0.810
+P-value,0.4195
+Cohen's d,0.094
+Log-rank p-value,0.1023
+Median Pre-Reno DOM,59.4
+Median Post-Reno DOM,59.3

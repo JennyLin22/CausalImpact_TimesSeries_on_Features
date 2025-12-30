@@ -1,0 +1,136 @@
+-- Get complete time series for properties with bedroom/bathroom changes
+WITH property_feature_changes AS (
+  -- Identify properties with feature changes
+  SELECT
+    mls.CC_PROPERTY_ID,
+    MIN(mls.RECORD_DATE_TIME) AS first_listing,
+    MAX(mls.RECORD_DATE_TIME) AS last_listing,
+    MIN(CASE WHEN mls.BEDROOMS IS NOT NULL THEN mls.BEDROOMS END) AS min_bedrooms,
+    MAX(CASE WHEN mls.BEDROOMS IS NOT NULL THEN mls.BEDROOMS END) AS max_bedrooms,
+    MIN(CASE WHEN mls.FULL_BATHS IS NOT NULL THEN mls.FULL_BATHS END) AS min_full_baths,
+    MAX(CASE WHEN mls.FULL_BATHS IS NOT NULL THEN mls.FULL_BATHS END) AS max_full_baths
+  FROM ROC_MLS_DATA.ATTOM.MLS mls
+  INNER JOIN ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR a
+    ON mls.CC_PROPERTY_ID = a.PROPERTYID
+  WHERE mls.RECORD_DATE_TIME >= '2015-01-01'
+    AND (
+      (UPPER(a.SITUSSTATE) IN ('NY', 'NEW YORK')
+       AND a.SITUSZIP5 NOT LIKE '100%' AND a.SITUSZIP5 NOT LIKE '101%'
+       AND a.SITUSZIP5 NOT LIKE '102%' AND a.SITUSZIP5 NOT LIKE '103%'
+       AND a.SITUSZIP5 NOT LIKE '104%' AND a.SITUSZIP5 NOT LIKE '112%'
+       AND a.SITUSZIP5 NOT LIKE '113%' AND a.SITUSZIP5 NOT LIKE '114%'
+       AND a.SITUSZIP5 NOT LIKE '116%')
+      OR UPPER(a.SITUSSTATE) IN ('OH', 'OHIO')
+    )
+  GROUP BY mls.CC_PROPERTY_ID
+  HAVING MAX(mls.BEDROOMS) > MIN(mls.BEDROOMS)
+      OR MAX(mls.FULL_BATHS) > MIN(mls.FULL_BATHS)
+  LIMIT 100
+),
+-- Get all time series points for treated properties
+treated_series AS (
+  SELECT
+    mls.CC_PROPERTY_ID,
+    mls.RECORD_DATE_TIME,
+    mls.BEDROOMS,
+    mls.FULL_BATHS,
+    mls.HALF_BATHS,
+    mls.GLA_SQFT,
+    mls.LIST_PRICE,
+    mls.CLOSE_PRICE,
+    COALESCE(mls.CLOSE_PRICE, mls.LIST_PRICE) AS PRICE,
+    a.SITUSZIP5,
+    a.SITUSCITY,
+    a.SITUSSTATE,
+
+    -- Identify if this is before or after the change
+    CASE
+      WHEN mls.BEDROOMS = pfc.min_bedrooms
+        AND mls.FULL_BATHS = pfc.min_full_baths
+      THEN 'PRE_TREATMENT'
+      WHEN mls.BEDROOMS = pfc.max_bedrooms
+        AND mls.FULL_BATHS = pfc.max_full_baths
+      THEN 'POST_TREATMENT'
+      ELSE 'TRANSITION'
+    END AS TREATMENT_PERIOD,
+
+    'TREATED' AS PROPERTY_TYPE
+
+  FROM ROC_MLS_DATA.ATTOM.MLS mls
+  INNER JOIN property_feature_changes pfc
+    ON mls.CC_PROPERTY_ID = pfc.CC_PROPERTY_ID
+  INNER JOIN ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR a
+    ON mls.CC_PROPERTY_ID = a.PROPERTYID
+  WHERE mls.RECORD_DATE_TIME BETWEEN pfc.first_listing AND pfc.last_listing
+    AND COALESCE(mls.CLOSE_PRICE, mls.LIST_PRICE) IS NOT NULL
+),
+-- Get control properties (similar but no feature changes)
+control_properties AS (
+  SELECT DISTINCT
+    mls.CC_PROPERTY_ID,
+    a.SITUSZIP5,
+    mls.BEDROOMS,
+    mls.FULL_BATHS,
+    mls.GLA_SQFT
+  FROM ROC_MLS_DATA.ATTOM.MLS mls
+  INNER JOIN ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR a
+    ON mls.CC_PROPERTY_ID = a.PROPERTYID
+  WHERE mls.RECORD_DATE_TIME >= '2015-01-01'
+    AND (
+      (UPPER(a.SITUSSTATE) IN ('NY', 'NEW YORK')
+       AND a.SITUSZIP5 NOT LIKE '100%' AND a.SITUSZIP5 NOT LIKE '101%'
+       AND a.SITUSZIP5 NOT LIKE '102%' AND a.SITUSZIP5 NOT LIKE '103%'
+       AND a.SITUSZIP5 NOT LIKE '104%' AND a.SITUSZIP5 NOT LIKE '112%'
+       AND a.SITUSZIP5 NOT LIKE '113%' AND a.SITUSZIP5 NOT LIKE '114%'
+       AND a.SITUSZIP5 NOT LIKE '116%')
+      OR UPPER(a.SITUSSTATE) IN ('OH', 'OHIO')
+    )
+    AND mls.CC_PROPERTY_ID NOT IN (SELECT CC_PROPERTY_ID FROM property_feature_changes)
+    AND mls.BEDROOMS IS NOT NULL
+    AND mls.FULL_BATHS IS NOT NULL
+  GROUP BY mls.CC_PROPERTY_ID, a.SITUSZIP5, mls.BEDROOMS, mls.FULL_BATHS, mls.GLA_SQFT
+  HAVING COUNT(DISTINCT mls.BEDROOMS) = 1  -- Features didn't change
+     AND COUNT(DISTINCT mls.FULL_BATHS) = 1
+  LIMIT 500
+),
+control_series AS (
+  SELECT
+    mls.CC_PROPERTY_ID,
+    mls.RECORD_DATE_TIME,
+    mls.BEDROOMS,
+    mls.FULL_BATHS,
+    mls.HALF_BATHS,
+    mls.GLA_SQFT,
+    COALESCE(mls.CLOSE_PRICE, mls.LIST_PRICE) AS PRICE,
+    a.SITUSZIP5,
+    a.SITUSCITY,
+    a.SITUSSTATE,
+    'CONTROL' AS PROPERTY_TYPE
+  FROM ROC_MLS_DATA.ATTOM.MLS mls
+  INNER JOIN control_properties cp
+    ON mls.CC_PROPERTY_ID = cp.CC_PROPERTY_ID
+  INNER JOIN ROC_PUBLIC_RECORD_DATA.DATATREE.ASSESSOR a
+    ON mls.CC_PROPERTY_ID = a.PROPERTYID
+  WHERE mls.RECORD_DATE_TIME >= '2015-01-01'
+    AND COALESCE(mls.CLOSE_PRICE, mls.LIST_PRICE) IS NOT NULL
+)
+
+-- Combine treated and control
+SELECT * FROM treated_series
+UNION ALL
+SELECT
+  CC_PROPERTY_ID,
+  RECORD_DATE_TIME,
+  BEDROOMS,
+  FULL_BATHS,
+  HALF_BATHS,
+  GLA_SQFT,
+  PRICE,
+  SITUSZIP5,
+  SITUSCITY,
+  SITUSSTATE,
+  NULL AS TREATMENT_PERIOD,
+  PROPERTY_TYPE
+FROM control_series
+
+ORDER BY PROPERTY_TYPE, CC_PROPERTY_ID, RECORD_DATE_TIME;
